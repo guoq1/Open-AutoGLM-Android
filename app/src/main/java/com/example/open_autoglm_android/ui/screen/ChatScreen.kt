@@ -1,5 +1,6 @@
 package com.example.open_autoglm_android.ui.screen
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -8,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -24,8 +26,18 @@ fun ChatScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
     
     var userInput by remember { mutableStateOf("") }
+    
+    // 显示任务完成 toast
+    LaunchedEffect(uiState.taskCompletedMessage) {
+        uiState.taskCompletedMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            // 清除消息，避免重复显示
+            viewModel.clearTaskCompletedMessage()
+        }
+    }
     
     LaunchedEffect(uiState.messages.size) {
         if (uiState.messages.isNotEmpty()) {

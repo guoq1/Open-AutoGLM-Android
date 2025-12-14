@@ -231,14 +231,112 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
     
     /**
      * 尝试修复格式错误的 JSON
+     * 参考原始项目的 parse_action 函数，支持 do(action="Tap", element=[389,116]) 格式
      * 支持多种格式：
-     * 1. do(action="Launch", app="QQ") -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
-     * 2. do, " action_name": "Launch", "app_name": "高德地图") -> {"_metadata": "do", "action": "Launch", "app": "高德地图"}
-     * 3. action_name: "Launch", app_name: "QQ" -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+     * 1. do(action="Tap", element=[389,116]) -> {"_metadata": "do", "action": "Tap", "element": [389, 116]}
+     * 2. do(action="Launch", app="QQ") -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+     * 3. do(action="Type", text="奶茶") -> {"_metadata": "do", "action": "Type", "text": "奶茶"}
+     * 4. finish(message="完成") -> {"_metadata": "finish", "message": "完成"}
      */
     private fun tryFixMalformedJson(text: String): String {
-        Log.d("ActionExecutor", "尝试修复格式错误的 JSON: $text")
+        Log.d("ActionExecutor", "尝试修复格式错误的 JSON: ${text.take(200)}")
         
+        // 首先尝试提取 do(...) 或 finish(...) 函数调用
+        // 模式: do(...) 或 finish(...)
+        val functionCallPattern = Regex("""(do|finish)\s*\(([^)]+)\)""", RegexOption.IGNORE_CASE)
+        val functionMatch = functionCallPattern.find(text)
+        
+        if (functionMatch != null) {
+            val functionName = functionMatch.groupValues[1].lowercase()
+            val paramsStr = functionMatch.groupValues[2]
+            
+            Log.d("ActionExecutor", "找到函数调用: $functionName, 参数: $paramsStr")
+            
+            if (functionName == "finish") {
+                // finish(message="完成") 格式
+                val messagePattern = Regex("""message\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                val messageMatch = messagePattern.find(paramsStr)
+                val message = messageMatch?.groupValues?.get(1) ?: paramsStr.trim().trim('"', '\'')
+                val fixed = """{"_metadata": "finish", "message": "$message"}"""
+                Log.d("ActionExecutor", "修复 finish 调用: $fixed")
+                return fixed
+            } else if (functionName == "do") {
+                // do(action="Tap", element=[389,116]) 格式
+                val action = mutableMapOf<String, Any>("_metadata" to "do")
+                
+                // 解析参数：key=value 格式，支持字符串和数组
+                // 匹配: key="value" 或 key=[1,2,3] 或 key=123
+                val paramPattern = Regex("""(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]]+\]|\d+\.?\d*|true|false)""", RegexOption.IGNORE_CASE)
+                val paramMatches = paramPattern.findAll(paramsStr)
+                
+                for (match in paramMatches) {
+                    val key = match.groupValues[1]
+                    var valueStr = match.groupValues[2].trim()
+                    
+                    // 解析值
+                    val value: Any = when {
+                        valueStr.startsWith("[") -> {
+                            // 数组值，解析为 JSON 数组字符串
+                            // 例如: [389,116] -> [389,116]
+                            // 确保格式正确（移除空格，如果有）
+                            val arrayContent = valueStr.substring(1, valueStr.length - 1)
+                            val arrayValues = arrayContent.split(",").map { it.trim() }
+                            "[" + arrayValues.joinToString(",") + "]"
+                        }
+                        valueStr.startsWith("\"") || valueStr.startsWith("'") -> {
+                            // 字符串值，移除引号并处理转义
+                            valueStr.trim('"', '\'').replace("\\\"", "\"").replace("\\'", "'")
+                        }
+                        valueStr == "true" -> true
+                        valueStr == "false" -> false
+                        valueStr.contains(".") -> valueStr.toDoubleOrNull() ?: valueStr
+                        else -> valueStr.toIntOrNull() ?: valueStr
+                    }
+                    
+                    action[key] = value
+                }
+                
+                // 转换为 JSON 字符串
+                val jsonBuilder = StringBuilder()
+                jsonBuilder.append("{")
+                jsonBuilder.append("\"_metadata\": \"do\"")
+                
+                for ((key, value) in action) {
+                    if (key == "_metadata") continue
+                    
+                    jsonBuilder.append(", ")
+                    jsonBuilder.append("\"$key\": ")
+                    
+                    when (value) {
+                        is String -> {
+                            // 检查是否是数组字符串
+                            if (value.startsWith("[")) {
+                                jsonBuilder.append(value)
+                            } else {
+                                jsonBuilder.append("\"${value.replace("\"", "\\\"")}\"")
+                            }
+                        }
+                        is Number -> jsonBuilder.append(value)
+                        is Boolean -> jsonBuilder.append(value)
+                        else -> {
+                            val valueStr = value.toString()
+                            if (valueStr.startsWith("[")) {
+                                jsonBuilder.append(valueStr)
+                            } else {
+                                jsonBuilder.append("\"${valueStr.replace("\"", "\\\"")}\"")
+                            }
+                        }
+                    }
+                }
+                
+                jsonBuilder.append("}")
+                val fixed = jsonBuilder.toString()
+                Log.d("ActionExecutor", "修复 do 调用: $fixed")
+                return fixed
+            }
+        }
+        
+        // 如果找不到函数调用，尝试其他格式
         // 模式1: do(action="Launch", app="QQ") 或 do(action='Launch', app='QQ')
         val pattern1 = Regex("""do\s*\(\s*action\s*=\s*["']([^"']+)["']\s*,\s*app\s*=\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE)
         val match1 = pattern1.find(text)
@@ -260,60 +358,33 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
             return fixed
         }
         
-        // 模式3: do, " action_name": "Launch", "app_name": "高德地图")
-        val pattern2 = Regex("""do,\s*"action_name":\s*"(\w+)",\s*"app_name":\s*"([^"]+)""")
-        val match2 = pattern2.find(text)
-        if (match2 != null) {
-            val actionName = match2.groupValues[1]
-            val appName = match2.groupValues[2]
-            val fixed = """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
-            Log.d("ActionExecutor", "模式2匹配，修复为: $fixed")
-            return fixed
-        }
-        
-        // 模式4: action_name: "Launch", app_name: "QQ" 或 action_name="Launch", app_name="QQ"
-        val pattern3 = Regex("""action_name["\s]*:["\s]*["']?([^"'\s,]+)["']?\s*[,，]\s*app_name["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
-        val match3 = pattern3.find(text)
-        if (match3 != null) {
-            val actionName = match3.groupValues[1]
-            val appName = match3.groupValues[2]
-            val fixed = """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
-            Log.d("ActionExecutor", "模式3匹配，修复为: $fixed")
-            return fixed
-        }
-        
-        // 模式5: 只找到 action_name，没有 app_name
-        val pattern4 = Regex("""action_name["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
-        val match4 = pattern4.find(text)
-        if (match4 != null) {
-            val actionName = match4.groupValues[1]
-            // 尝试找到 app 或 app_name
-            val appPattern = Regex("""(?:app|app_name)["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
-            val appMatch = appPattern.find(text)
-            val appName = appMatch?.groupValues?.get(1) ?: ""
-            
-            val fixed = if (appName.isNotEmpty()) {
-                """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
-            } else {
-                """{"_metadata": "do", "action": "$actionName"}"""
-            }
-            Log.d("ActionExecutor", "模式4匹配，修复为: $fixed")
-            return fixed
-        }
-        
-        // 模式6: 尝试从文本中提取 action 和 app 的关键词
+        // 模式3: 尝试从文本中提取 action 和 app 的关键词
         // 例如："打开QQ" -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
         val launchPattern = Regex("""(?:打开|启动|运行|launch)\s*([^\s，,。.]+)""", RegexOption.IGNORE_CASE)
         val launchMatch = launchPattern.find(text)
         if (launchMatch != null) {
             val appName = launchMatch.groupValues[1].trim()
             val fixed = """{"_metadata": "do", "action": "Launch", "app": "$appName"}"""
-            Log.d("ActionExecutor", "模式6匹配（打开应用），修复为: $fixed")
+            Log.d("ActionExecutor", "模式3匹配（打开应用），修复为: $fixed")
             return fixed
         }
         
         Log.w("ActionExecutor", "无法修复格式错误的 JSON")
         return ""
+    }
+    
+    /**
+     * 将相对坐标（0-1000）转换为绝对像素坐标
+     * 参考原项目的 _convert_relative_to_absolute 方法
+     */
+    private fun convertRelativeToAbsolute(
+        element: List<Float>,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Pair<Float, Float> {
+        val x = (element[0] / 1000f) * screenWidth
+        val y = (element[1] / 1000f) * screenHeight
+        return Pair(x, y)
     }
     
     private suspend fun executeAction(
@@ -360,14 +431,23 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
         val element = actionObj.get("element")
         
         return if (element?.isJsonArray == true) {
-            // 坐标形式 [x, y]
+            // 坐标形式 [x, y] - 模型返回的是相对坐标（0-1000），需要转换为绝对像素
             val array = element.asJsonArray
             if (array.size() >= 2) {
-                val x = array[0].asFloat
-                val y = array[1].asFloat
-                service.tap(x, y)
+                val relativeX = array[0].asFloat
+                val relativeY = array[1].asFloat
+                
+                // 转换为绝对坐标
+                val (absoluteX, absoluteY) = convertRelativeToAbsolute(
+                    listOf(relativeX, relativeY),
+                    screenWidth,
+                    screenHeight
+                )
+                
+                Log.d("ActionExecutor", "Tap: 相对坐标 ($relativeX, $relativeY) -> 绝对坐标 ($absoluteX, $absoluteY)")
+                service.tap(absoluteX, absoluteY)
                 delay(500)
-                ExecuteResult(success = true)
+                ExecuteResult(success = true, message = "已点击坐标: ($absoluteX, $absoluteY)")
             } else {
                 ExecuteResult(success = false, message = "坐标格式错误")
             }
@@ -425,14 +505,22 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
             return ExecuteResult(success = false, message = "Swipe 操作缺少 start 或 end 参数")
         }
         
-        val startX = start[0].asFloat
-        val startY = start[1].asFloat
-        val endX = end[0].asFloat
-        val endY = end[1].asFloat
+        // 转换为绝对坐标
+        val (startX, startY) = convertRelativeToAbsolute(
+            listOf(start[0].asFloat, start[1].asFloat),
+            screenWidth,
+            screenHeight
+        )
+        val (endX, endY) = convertRelativeToAbsolute(
+            listOf(end[0].asFloat, end[1].asFloat),
+            screenWidth,
+            screenHeight
+        )
         
+        Log.d("ActionExecutor", "Swipe: 从 ($startX, $startY) 到 ($endX, $endY)")
         service.swipe(startX, startY, endX, endY)
         delay(500)
-        return ExecuteResult(success = true)
+        return ExecuteResult(success = true, message = "已滑动从 ($startX, $startY) 到 ($endX, $endY)")
     }
     
     private suspend fun back(): ExecuteResult {
@@ -454,11 +542,17 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
             return ExecuteResult(success = false, message = "LongPress 操作缺少 element 参数")
         }
         
-        val x = element[0].asFloat
-        val y = element[1].asFloat
+        // 转换为绝对坐标
+        val (x, y) = convertRelativeToAbsolute(
+            listOf(element[0].asFloat, element[1].asFloat),
+            screenWidth,
+            screenHeight
+        )
+        
+        Log.d("ActionExecutor", "LongPress: 坐标 ($x, $y)")
         service.longPress(x, y)
         delay(800)
-        return ExecuteResult(success = true)
+        return ExecuteResult(success = true, message = "已长按坐标: ($x, $y)")
     }
     
     private suspend fun doubleTap(actionObj: JsonObject, screenWidth: Int, screenHeight: Int): ExecuteResult {
@@ -468,15 +562,20 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
             return ExecuteResult(success = false, message = "DoubleTap 操作缺少 element 参数")
         }
         
-        val x = element[0].asFloat
-        val y = element[1].asFloat
+        // 转换为绝对坐标
+        val (x, y) = convertRelativeToAbsolute(
+            listOf(element[0].asFloat, element[1].asFloat),
+            screenWidth,
+            screenHeight
+        )
         
+        Log.d("ActionExecutor", "DoubleTap: 坐标 ($x, $y)")
         // 双击就是连续两次点击
         service.tap(x, y)
         delay(100)
         service.tap(x, y)
         delay(500)
-        return ExecuteResult(success = true)
+        return ExecuteResult(success = true, message = "已双击坐标: ($x, $y)")
     }
     
     private suspend fun wait(actionObj: JsonObject): ExecuteResult {

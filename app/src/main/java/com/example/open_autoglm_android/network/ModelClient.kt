@@ -43,40 +43,14 @@ class ModelClient(
         api = retrofit.create(AutoGLMApi::class.java)
     }
     
+    /**
+     * 请求模型（使用消息上下文）
+     */
     suspend fun request(
-        userPrompt: String,
-        screenshot: Bitmap?,
+        messages: List<ChatMessage>,
         modelName: String,
-        apiKey: String,
-        currentApp: String? = null
+        apiKey: String
     ): ModelResponse {
-        val messages = mutableListOf<ChatMessage>()
-        
-        // System message
-        val systemPrompt = buildSystemPrompt()
-        messages.add(
-            ChatMessage(
-                role = "system",
-                content = listOf(ContentItem(type = "text", text = systemPrompt))
-            )
-        )
-        
-        // User message with screenshot
-        val userContent = mutableListOf<ContentItem>()
-        userContent.add(ContentItem(type = "text", text = buildUserMessage(userPrompt, currentApp)))
-        
-        screenshot?.let { bitmap ->
-            val base64Image = bitmapToBase64(bitmap)
-            userContent.add(
-                ContentItem(
-                    type = "image_url",
-                    imageUrl = ImageUrl(url = "data:image/jpeg;base64,$base64Image")
-                )
-            )
-        }
-        
-        messages.add(ChatMessage(role = "user", content = userContent))
-        
         val request = ChatRequest(
             model = modelName,
             messages = messages,
@@ -100,6 +74,95 @@ class ModelClient(
         } else {
             throw Exception("API request failed: ${response.code()} ${response.message()}")
         }
+    }
+    
+    /**
+     * 创建系统消息
+     */
+    fun createSystemMessage(): ChatMessage {
+        val systemPrompt = buildSystemPrompt()
+        return ChatMessage(
+            role = "system",
+            content = listOf(ContentItem(type = "text", text = systemPrompt))
+        )
+    }
+    
+    /**
+     * 创建用户消息（第一次调用，包含原始任务）
+     */
+    fun createUserMessage(userPrompt: String, screenshot: Bitmap?, currentApp: String?): ChatMessage {
+        val userContent = mutableListOf<ContentItem>()
+        val screenInfo = buildScreenInfo(currentApp)
+        val textContent = "$userPrompt\n\n$screenInfo"
+        userContent.add(ContentItem(type = "text", text = textContent))
+        
+        screenshot?.let { bitmap ->
+            val base64Image = bitmapToBase64(bitmap)
+            userContent.add(
+                ContentItem(
+                    type = "image_url",
+                    imageUrl = ImageUrl(url = "data:image/jpeg;base64,$base64Image")
+                )
+            )
+        }
+        
+        return ChatMessage(role = "user", content = userContent)
+    }
+    
+    /**
+     * 创建屏幕信息消息（后续调用，只包含屏幕信息）
+     */
+    fun createScreenInfoMessage(screenshot: Bitmap?, currentApp: String?): ChatMessage {
+        val userContent = mutableListOf<ContentItem>()
+        val screenInfo = buildScreenInfo(currentApp)
+        val textContent = "** Screen Info **\n\n$screenInfo"
+        userContent.add(ContentItem(type = "text", text = textContent))
+        
+        screenshot?.let { bitmap ->
+            val base64Image = bitmapToBase64(bitmap)
+            userContent.add(
+                ContentItem(
+                    type = "image_url",
+                    imageUrl = ImageUrl(url = "data:image/jpeg;base64,$base64Image")
+                )
+            )
+        }
+        
+        return ChatMessage(role = "user", content = userContent)
+    }
+    
+    /**
+     * 创建助手消息（添加到上下文）
+     */
+    fun createAssistantMessage(thinking: String, action: String): ChatMessage {
+        val content = "<think>$thinking</think><answer>$action</answer>"
+        return ChatMessage(
+            role = "assistant",
+            content = listOf(ContentItem(type = "text", text = content))
+        )
+    }
+    
+    /**
+     * 构建屏幕信息
+     */
+    private fun buildScreenInfo(currentApp: String?): String {
+        return if (currentApp != null) {
+            "当前应用: $currentApp"
+        } else {
+            "当前应用: 未知"
+        }
+    }
+    
+    /**
+     * 从消息中移除图片内容，只保留文本（节省 token）
+     * 参考原项目的 MessageBuilder.remove_images_from_message
+     */
+    fun removeImagesFromMessage(message: ChatMessage): ChatMessage {
+        val textOnlyContent = message.content.filter { it.type == "text" }
+        return ChatMessage(
+            role = message.role,
+            content = textOnlyContent
+        )
     }
     
     private fun bitmapToBase64(bitmap: Bitmap): String {
@@ -132,13 +195,6 @@ class ModelClient(
 在 <think> 标签中提供你的思考过程，在 <answer> 标签中提供动作 JSON。"""
     }
     
-    private fun buildUserMessage(userPrompt: String, currentApp: String?): String {
-        return if (currentApp != null) {
-            "$userPrompt\n\n当前应用: $currentApp"
-        } else {
-            userPrompt
-        }
-    }
     
     private fun parseResponse(content: String): ModelResponse {
         Log.d("ModelClient", "解析响应内容: ${content.take(500)}")
@@ -156,19 +212,28 @@ class ModelClient(
         
         Log.d("ModelClient", "从 answer 标签提取: $action")
         
-        // 如果没有 <answer> 标签，尝试从文本中提取 JSON
+        // 如果没有 <answer> 标签，尝试从文本中提取 JSON 或 do(...) 格式
         if (action.isEmpty() || !action.trim().startsWith("{")) {
-            val extractedJson = extractJsonFromContent(content)
-            if (extractedJson.isNotEmpty()) {
-                action = extractedJson
-                Log.d("ModelClient", "从内容中提取 JSON: $action")
+            // 首先尝试提取 do(...) 或 finish(...) 格式
+            val functionCallPattern = Regex("""(do|finish)\s*\([^)]+\)""", RegexOption.IGNORE_CASE)
+            val functionMatch = functionCallPattern.find(content)
+            if (functionMatch != null) {
+                action = functionMatch.value
+                Log.d("ModelClient", "从内容中提取函数调用: $action")
+            } else {
+                // 如果没有找到函数调用，尝试提取 JSON
+                val extractedJson = extractJsonFromContent(content)
+                if (extractedJson.isNotEmpty()) {
+                    action = extractedJson
+                    Log.d("ModelClient", "从内容中提取 JSON: $action")
+                }
             }
         }
         
         // 如果还是找不到，使用整个内容
         if (action.isEmpty()) {
             action = content.trim()
-            Log.w("ModelClient", "未找到 JSON，使用整个内容")
+            Log.w("ModelClient", "未找到 JSON 或函数调用，使用整个内容")
         }
         
         return ModelResponse(thinking = thinking, action = action)

@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.open_autoglm_android.data.PreferencesRepository
 import com.example.open_autoglm_android.domain.ActionExecutor
 import com.example.open_autoglm_android.network.ModelClient
+import com.example.open_autoglm_android.network.dto.ChatMessage as NetworkChatMessage
 import com.example.open_autoglm_android.service.AutoGLMAccessibilityService
 import com.example.open_autoglm_android.util.BitmapUtils
 import com.example.open_autoglm_android.util.DeviceUtils
@@ -34,7 +35,8 @@ data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
-    val currentApp: String? = null
+    val currentApp: String? = null,
+    val taskCompletedMessage: String? = null // 任务完成消息，用于显示 toast
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -46,6 +48,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     
     private var modelClient: ModelClient? = null
     private var actionExecutor: ActionExecutor? = null
+    
+    // 维护对话上下文（消息历史）
+    private val messageContext = mutableListOf<NetworkChatMessage>()
     
     init {
         viewModelScope.launch {
@@ -109,8 +114,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 modelClient = ModelClient(baseUrl, apiKey)
                 actionExecutor = ActionExecutor(accessibilityService)
                 
+                // 清空消息上下文，开始新的任务
+                messageContext.clear()
+                
                 // 执行任务循环
-                executeTaskLoop(userInput, modelName)
+                executeTaskLoop(userInput, modelName, apiKey)
                 
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
@@ -121,16 +129,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     
-    private suspend fun executeTaskLoop(userPrompt: String, modelName: String) {
+    private suspend fun executeTaskLoop(userPrompt: String, modelName: String, apiKey: String) {
         val accessibilityService = AutoGLMAccessibilityService.getInstance() ?: return
         val client = modelClient ?: return
         val executor = actionExecutor ?: return
         
-        var currentPrompt = userPrompt
         var stepCount = 0
         val maxSteps = 50
         
         while (stepCount < maxSteps) {
+            Log.d("ChatViewModel", "执行步骤 $stepCount")
+            
             // 截图
             val screenshot = accessibilityService.takeScreenshotSuspend()
             
@@ -167,17 +176,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             
             // 获取当前应用
             val currentApp = accessibilityService.currentApp.value
+            Log.d("ChatViewModel", "当前应用: $currentApp")
             
-            // 调用模型
+            // 构建消息上下文
+            if (stepCount == 0) {
+                // 第一次调用：添加系统消息和用户消息（包含原始任务）
+                if (messageContext.isEmpty()) {
+                    messageContext.add(client.createSystemMessage())
+                }
+                messageContext.add(client.createUserMessage(userPrompt, screenshot, currentApp))
+            } else {
+                // 后续调用：只添加屏幕信息
+                messageContext.add(client.createScreenInfoMessage(screenshot, currentApp))
+            }
+            
+            // 调用模型（使用消息上下文）
+            val messagesList: List<NetworkChatMessage> = messageContext.toList()
             val response = client.request(
-                userPrompt = if (stepCount == 0) currentPrompt else "继续执行任务",
-                screenshot = screenshot,
+                messages = messagesList,
                 modelName = modelName,
-                apiKey = preferencesRepository.getApiKeySync() ?: "EMPTY",
-                currentApp = currentApp
+                apiKey = apiKey
             )
+            Log.d("ChatViewModel", "模型响应: thinking=${response.thinking.take(100)}, action=${response.action.take(100)}")
             
-            // 添加助手消息
+            // 添加助手消息到上下文
+            messageContext.add(client.createAssistantMessage(response.thinking, response.action))
+            
+            // 从上下文中移除最后一条用户消息的图片（节省 token，参考原项目）
+            // 在执行动作后，移除图片只保留文本，这样可以节省大量 token
+            if (messageContext.size >= 2) {
+                val lastUserMessageIndex = messageContext.size - 2
+                val lastUserMessage = messageContext[lastUserMessageIndex]
+                if (lastUserMessage.role == "user") {
+                    // 移除图片，只保留文本
+                    messageContext[lastUserMessageIndex] = client.removeImagesFromMessage(lastUserMessage)
+                    Log.d("ChatViewModel", "已移除最后一条用户消息中的图片，节省 token")
+                }
+            }
+            
+            // 添加助手消息到UI
             val assistantMessage = ChatMessage(
                 id = "${System.currentTimeMillis()}_$stepCount",
                 role = MessageRole.ASSISTANT,
@@ -193,9 +230,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // 解析并执行动作
             val result = executor.execute(
                 response.action,
-                screenshot!!.width,
-                screenshot!!.height
+                screenshot.width,
+                screenshot.height
             )
+            Log.d("ChatViewModel", "动作执行结果: success=${result.success}, message=${result.message}")
             
             val isFinished = result.message != null && (result.message!!.contains("完成") || 
                 result.message!!.contains("finish")) || 
@@ -204,7 +242,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             
             if (isFinished) {
                 // 任务完成
-                _uiState.value = _uiState.value.copy(isLoading = false)
+                val completionMessage = result.message ?: "任务已完成"
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    taskCompletedMessage = completionMessage
+                )
+                Log.d("ChatViewModel", "任务完成: $completionMessage")
                 return
             }
             
@@ -213,6 +256,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     isLoading = false,
                     error = result.message ?: "执行动作失败"
                 )
+                Log.e("ChatViewModel", "动作执行失败: ${result.message}")
                 return
             }
             
@@ -225,10 +269,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             isLoading = false,
             error = "达到最大步数限制"
         )
+        Log.w("ChatViewModel", "达到最大步数限制")
     }
     
     fun clearError() {
         _uiState.value = _uiState.value.copy(error = null)
+    }
+    
+    fun clearTaskCompletedMessage() {
+        _uiState.value = _uiState.value.copy(taskCompletedMessage = null)
     }
     
     fun refreshModelClient() {
