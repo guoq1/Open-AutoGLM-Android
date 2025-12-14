@@ -4,11 +4,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
+import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.open_autoglm_android.service.AutoGLMAccessibilityService
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.stream.JsonReader
 import kotlinx.coroutines.delay
+import java.io.StringReader
 
 data class ExecuteResult(
     val success: Boolean,
@@ -19,27 +22,298 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
     
     suspend fun execute(actionJson: String, screenWidth: Int, screenHeight: Int): ExecuteResult {
         return try {
-            val jsonElement = JsonParser.parseString(actionJson)
-            val actionObj = jsonElement.asJsonObject
+            Log.d("ActionExecutor", "开始解析动作: ${actionJson.take(500)}")
             
-            val metadata = actionObj.get("_metadata")?.asString ?: ""
+            // 尝试从文本中提取 JSON 对象
+            val jsonString = extractJsonFromText(actionJson)
+            Log.d("ActionExecutor", "提取的 JSON: ${jsonString.take(200)}")
             
-            when (metadata) {
-                "finish" -> {
-                    val message = actionObj.get("message")?.asString ?: "任务完成"
-                    ExecuteResult(success = true, message = message)
+            // 如果提取的 JSON 为空或与原始文本相同，说明提取失败
+            if (jsonString.isEmpty() || jsonString == actionJson.trim()) {
+                // 再次尝试修复
+                val fixedJson = tryFixMalformedJson(actionJson)
+                if (fixedJson.isNotEmpty()) {
+                    try {
+                        val jsonElement = JsonParser.parseString(fixedJson)
+                        if (jsonElement.isJsonObject) {
+                            val actionObj = jsonElement.asJsonObject
+                            Log.d("ActionExecutor", "修复后解析成功，对象: $actionObj")
+                            return processActionObject(actionObj, screenWidth, screenHeight)
+                        }
+                    } catch (e: Exception) {
+                        Log.w("ActionExecutor", "修复后的 JSON 仍然无法解析", e)
+                    }
                 }
-                "do" -> {
-                    val action = actionObj.get("action")?.asString ?: ""
-                    executeAction(action, actionObj, screenWidth, screenHeight)
-                }
-                else -> {
-                    ExecuteResult(success = false, message = "未知的动作类型: $metadata")
+                
+                // 如果修复也失败，返回错误
+                return ExecuteResult(
+                    success = false,
+                    message = "无法从响应中提取有效的 JSON 动作。响应内容: ${actionJson.take(200)}"
+                )
+            }
+            
+            // 使用 lenient 模式解析 JSON
+            val jsonElement = try {
+                JsonParser.parseString(jsonString)
+            } catch (e: Exception) {
+                // 如果标准解析失败，尝试使用 lenient 模式
+                Log.w("ActionExecutor", "标准解析失败，尝试 lenient 模式", e)
+                try {
+                    val reader = JsonReader(StringReader(jsonString))
+                    reader.isLenient = true
+                    JsonParser.parseReader(reader)
+                } catch (e2: Exception) {
+                    Log.e("ActionExecutor", "Lenient 模式也失败", e2)
+                    // 最后尝试修复
+                    val fixedJson = tryFixMalformedJson(jsonString)
+                    if (fixedJson.isNotEmpty()) {
+                        try {
+                            return processActionObject(JsonParser.parseString(fixedJson).asJsonObject, screenWidth, screenHeight)
+                        } catch (e3: Exception) {
+                            Log.e("ActionExecutor", "修复后仍然无法解析", e3)
+                        }
+                    }
+                    throw e2
                 }
             }
+            
+            // 检查是否是 JSON 对象
+            if (!jsonElement.isJsonObject) {
+                val errorMsg = if (jsonElement.isJsonPrimitive) {
+                    "响应不是 JSON 对象，而是: ${jsonElement.asString.take(100)}"
+                } else {
+                    "响应不是 JSON 对象"
+                }
+                throw IllegalStateException(errorMsg)
+            }
+            
+            val actionObj = jsonElement.asJsonObject
+            Log.d("ActionExecutor", "解析成功，对象: $actionObj")
+            
+            processActionObject(actionObj, screenWidth, screenHeight)
         } catch (e: Exception) {
+            Log.e("ActionExecutor", "解析动作失败", e)
             ExecuteResult(success = false, message = "解析动作失败: ${e.message}")
         }
+    }
+    
+    private suspend fun processActionObject(actionObj: JsonObject, screenWidth: Int, screenHeight: Int): ExecuteResult {
+        val metadata = actionObj.get("_metadata")?.asString ?: ""
+        
+        return when (metadata) {
+            "finish" -> {
+                val message = actionObj.get("message")?.asString ?: "任务完成"
+                ExecuteResult(success = true, message = message)
+            }
+            "do" -> {
+                val action = actionObj.get("action")?.asString ?: ""
+                executeAction(action, actionObj, screenWidth, screenHeight)
+            }
+            else -> {
+                ExecuteResult(success = false, message = "未知的动作类型: $metadata")
+            }
+        }
+    }
+    
+    /**
+     * 从文本中提取 JSON 对象
+     * 尝试找到第一个有效的 JSON 对象，如果找不到则尝试修复格式错误的 JSON
+     */
+    private fun extractJsonFromText(text: String): String {
+        val trimmed = text.trim()
+        Log.d("ActionExecutor", "extractJsonFromText 输入: ${trimmed.take(200)}")
+        
+        // 如果文本已经是有效的 JSON，直接返回
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            try {
+                // 验证是否是有效的 JSON
+                JsonParser.parseString(trimmed)
+                Log.d("ActionExecutor", "文本已经是有效的 JSON")
+                return trimmed
+            } catch (e: Exception) {
+                Log.d("ActionExecutor", "文本看起来像 JSON 但解析失败，继续处理")
+            }
+        }
+        
+        // 尝试找到所有可能的 JSON 对象
+        val jsonCandidates = mutableListOf<String>()
+        var startIndex = -1
+        var braceCount = 0
+        
+        for (i in trimmed.indices) {
+            when (trimmed[i]) {
+                '{' -> {
+                    if (startIndex == -1) {
+                        startIndex = i
+                    }
+                    braceCount++
+                }
+                '}' -> {
+                    braceCount--
+                    if (braceCount == 0 && startIndex != -1) {
+                        // 找到了一个完整的 JSON 对象
+                        val candidate = trimmed.substring(startIndex, i + 1)
+                        // 验证是否是有效的 JSON
+                        try {
+                            JsonParser.parseString(candidate)
+                            jsonCandidates.add(candidate)
+                            Log.d("ActionExecutor", "找到有效的 JSON 候选: ${candidate.take(100)}")
+                        } catch (e: Exception) {
+                            // 不是有效 JSON，忽略
+                        }
+                        startIndex = -1
+                    }
+                }
+            }
+        }
+        
+        // 返回第一个有效的 JSON 对象
+        if (jsonCandidates.isNotEmpty()) {
+            Log.d("ActionExecutor", "返回第一个有效的 JSON 候选")
+            return jsonCandidates.first()
+        }
+        
+        // 如果找不到完整的 JSON，尝试修复格式错误的 JSON
+        // 例如：do(action="Launch", app="QQ") -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+        val fixedJson = tryFixMalformedJson(trimmed)
+        if (fixedJson.isNotEmpty()) {
+            try {
+                // 验证修复后的 JSON 是否有效
+                JsonParser.parseString(fixedJson)
+                Log.d("ActionExecutor", "修复后的 JSON 有效: $fixedJson")
+                return fixedJson
+            } catch (e: Exception) {
+                Log.w("ActionExecutor", "修复后的 JSON 仍然无效", e)
+            }
+        }
+        
+        // 如果找不到完整的 JSON，尝试提取第一个 { } 之间的内容
+        val firstBrace = trimmed.indexOf('{')
+        val lastBrace = trimmed.lastIndexOf('}')
+        
+        if (firstBrace != -1 && lastBrace != -1 && lastBrace > firstBrace) {
+            val candidate = trimmed.substring(firstBrace, lastBrace + 1)
+            try {
+                JsonParser.parseString(candidate)
+                Log.d("ActionExecutor", "从第一个和最后一个大括号提取到有效 JSON")
+                return candidate
+            } catch (e: Exception) {
+                // 不是有效 JSON，尝试修复
+                val fixed = tryFixMalformedJson(candidate)
+                if (fixed.isNotEmpty()) {
+                    try {
+                        JsonParser.parseString(fixed)
+                        Log.d("ActionExecutor", "修复提取的 JSON 成功")
+                        return fixed
+                    } catch (e2: Exception) {
+                        // 修复失败
+                    }
+                }
+            }
+        }
+        
+        // 如果都找不到，最后再尝试一次修复整个文本
+        val finalFixed = tryFixMalformedJson(trimmed)
+        if (finalFixed.isNotEmpty()) {
+            try {
+                JsonParser.parseString(finalFixed)
+                Log.d("ActionExecutor", "最后修复尝试成功")
+                return finalFixed
+            } catch (e: Exception) {
+                Log.w("ActionExecutor", "最后修复尝试失败")
+            }
+        }
+        
+        // 如果都找不到，返回原始文本（让调用者处理错误）
+        Log.w("ActionExecutor", "无法提取或修复 JSON，返回原始文本")
+        return trimmed
+    }
+    
+    /**
+     * 尝试修复格式错误的 JSON
+     * 支持多种格式：
+     * 1. do(action="Launch", app="QQ") -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+     * 2. do, " action_name": "Launch", "app_name": "高德地图") -> {"_metadata": "do", "action": "Launch", "app": "高德地图"}
+     * 3. action_name: "Launch", app_name: "QQ" -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+     */
+    private fun tryFixMalformedJson(text: String): String {
+        Log.d("ActionExecutor", "尝试修复格式错误的 JSON: $text")
+        
+        // 模式1: do(action="Launch", app="QQ") 或 do(action='Launch', app='QQ')
+        val pattern1 = Regex("""do\s*\(\s*action\s*=\s*["']([^"']+)["']\s*,\s*app\s*=\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE)
+        val match1 = pattern1.find(text)
+        if (match1 != null) {
+            val actionName = match1.groupValues[1]
+            val appName = match1.groupValues[2]
+            val fixed = """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
+            Log.d("ActionExecutor", "模式1匹配，修复为: $fixed")
+            return fixed
+        }
+        
+        // 模式2: do(action="Launch") 只有 action，没有 app
+        val pattern1b = Regex("""do\s*\(\s*action\s*=\s*["']([^"']+)["']\s*\)""", RegexOption.IGNORE_CASE)
+        val match1b = pattern1b.find(text)
+        if (match1b != null) {
+            val actionName = match1b.groupValues[1]
+            val fixed = """{"_metadata": "do", "action": "$actionName"}"""
+            Log.d("ActionExecutor", "模式1b匹配，修复为: $fixed")
+            return fixed
+        }
+        
+        // 模式3: do, " action_name": "Launch", "app_name": "高德地图")
+        val pattern2 = Regex("""do,\s*"action_name":\s*"(\w+)",\s*"app_name":\s*"([^"]+)""")
+        val match2 = pattern2.find(text)
+        if (match2 != null) {
+            val actionName = match2.groupValues[1]
+            val appName = match2.groupValues[2]
+            val fixed = """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
+            Log.d("ActionExecutor", "模式2匹配，修复为: $fixed")
+            return fixed
+        }
+        
+        // 模式4: action_name: "Launch", app_name: "QQ" 或 action_name="Launch", app_name="QQ"
+        val pattern3 = Regex("""action_name["\s]*:["\s]*["']?([^"'\s,]+)["']?\s*[,，]\s*app_name["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
+        val match3 = pattern3.find(text)
+        if (match3 != null) {
+            val actionName = match3.groupValues[1]
+            val appName = match3.groupValues[2]
+            val fixed = """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
+            Log.d("ActionExecutor", "模式3匹配，修复为: $fixed")
+            return fixed
+        }
+        
+        // 模式5: 只找到 action_name，没有 app_name
+        val pattern4 = Regex("""action_name["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
+        val match4 = pattern4.find(text)
+        if (match4 != null) {
+            val actionName = match4.groupValues[1]
+            // 尝试找到 app 或 app_name
+            val appPattern = Regex("""(?:app|app_name)["\s]*:["\s]*["']?([^"'\s,)]+)["']?""", RegexOption.IGNORE_CASE)
+            val appMatch = appPattern.find(text)
+            val appName = appMatch?.groupValues?.get(1) ?: ""
+            
+            val fixed = if (appName.isNotEmpty()) {
+                """{"_metadata": "do", "action": "$actionName", "app": "$appName"}"""
+            } else {
+                """{"_metadata": "do", "action": "$actionName"}"""
+            }
+            Log.d("ActionExecutor", "模式4匹配，修复为: $fixed")
+            return fixed
+        }
+        
+        // 模式6: 尝试从文本中提取 action 和 app 的关键词
+        // 例如："打开QQ" -> {"_metadata": "do", "action": "Launch", "app": "QQ"}
+        val launchPattern = Regex("""(?:打开|启动|运行|launch)\s*([^\s，,。.]+)""", RegexOption.IGNORE_CASE)
+        val launchMatch = launchPattern.find(text)
+        if (launchMatch != null) {
+            val appName = launchMatch.groupValues[1].trim()
+            val fixed = """{"_metadata": "do", "action": "Launch", "app": "$appName"}"""
+            Log.d("ActionExecutor", "模式6匹配（打开应用），修复为: $fixed")
+            return fixed
+        }
+        
+        Log.w("ActionExecutor", "无法修复格式错误的 JSON")
+        return ""
     }
     
     private suspend fun executeAction(
@@ -215,6 +489,8 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
         // 简单的应用名到包名映射，可以后续扩展
         val appPackageMap = mapOf(
             "微信" to "com.tencent.mm",
+            "QQ" to "com.tencent.mobileqq",
+            "qq" to "com.tencent.mobileqq",
             "淘宝" to "com.taobao.taobao",
             "京东" to "com.jingdong.app.mall",
             "美团" to "com.sankuai.meituan",
@@ -233,14 +509,32 @@ class ActionExecutor(private val service: AutoGLMAccessibilityService) {
             }
         }
         
-        for (i in 0 until root.childCount) {
-            val child = root.getChild(i) ?: continue
-            val editable = findEditableNode(child)
-            if (editable != null) {
-                child.recycle()
-                return editable
+        val childCount = root.childCount
+        if (childCount > 0) {
+            // 先获取所有子节点的引用，避免在遍历时访问父节点导致警告
+            val children = mutableListOf<AccessibilityNodeInfo>()
+            for (i in 0 until childCount) {
+                val child = root.getChild(i)
+                if (child != null) {
+                    children.add(child)
+                }
             }
-            child.recycle()
+            
+            // 然后递归查找
+            for (child in children) {
+                val editable = findEditableNode(child)
+                if (editable != null) {
+                    // 清理其他未使用的子节点
+                    for (otherChild in children) {
+                        if (otherChild != child) {
+                            otherChild.recycle()
+                        }
+                    }
+                    child.recycle()
+                    return editable
+                }
+                child.recycle()
+            }
         }
         
         return null

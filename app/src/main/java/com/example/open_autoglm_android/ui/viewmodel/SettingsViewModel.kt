@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.open_autoglm_android.data.PreferencesRepository
-import com.example.open_autoglm_android.service.AutoGLMAccessibilityService
+import com.example.open_autoglm_android.util.AccessibilityServiceHelper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,7 +51,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
     
     fun checkAccessibilityService() {
-        val enabled = AutoGLMAccessibilityService.isServiceEnabled()
+        // 同时检查系统设置和服务实例
+        val enabledInSettings = AccessibilityServiceHelper.isAccessibilityServiceEnabled(getApplication())
+        val serviceRunning = AccessibilityServiceHelper.isServiceRunning()
+        // 服务必须在系统设置中启用，并且实例正在运行
+        val enabled = enabledInSettings && serviceRunning
         _uiState.value = _uiState.value.copy(isAccessibilityEnabled = enabled)
     }
     

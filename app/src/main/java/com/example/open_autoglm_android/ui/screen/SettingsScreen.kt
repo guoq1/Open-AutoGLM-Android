@@ -23,8 +23,15 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     
+    // 当屏幕可见时检查服务状态
     LaunchedEffect(Unit) {
         viewModel.checkAccessibilityService()
+    }
+    
+    // 使用 DisposableEffect 在每次进入设置页面时刷新状态
+    DisposableEffect(Unit) {
+        viewModel.checkAccessibilityService()
+        onDispose { }
     }
     
     Column(

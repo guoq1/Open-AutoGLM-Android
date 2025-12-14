@@ -2,12 +2,15 @@ package com.example.open_autoglm_android.ui.viewmodel
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.open_autoglm_android.data.PreferencesRepository
 import com.example.open_autoglm_android.domain.ActionExecutor
 import com.example.open_autoglm_android.network.ModelClient
 import com.example.open_autoglm_android.service.AutoGLMAccessibilityService
+import com.example.open_autoglm_android.util.BitmapUtils
+import com.example.open_autoglm_android.util.DeviceUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -129,24 +132,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         
         while (stepCount < maxSteps) {
             // 截图
-            var screenshot: Bitmap? = null
-            accessibilityService.takeScreenshot { bitmap ->
-                screenshot = bitmap
-            }
-            
-            // 等待截图完成
-            var waitCount = 0
-            while (screenshot == null && waitCount < 50) {
-                delay(100)
-                waitCount++
-            }
+            val screenshot = accessibilityService.takeScreenshotSuspend()
             
             if (screenshot == null) {
+                val androidVersion = android.os.Build.VERSION.SDK_INT
+                val errorMessage = if (androidVersion < android.os.Build.VERSION_CODES.R) {
+                    "无法获取屏幕截图：需要 Android 11 (API 30) 及以上版本，当前版本: Android ${android.os.Build.VERSION.RELEASE} (API $androidVersion)"
+                } else {
+                    "无法获取屏幕截图，请确保无障碍服务已启用并授予截图权限。如果已启用，请尝试重启应用。"
+                }
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    error = "无法获取屏幕截图"
+                    error = errorMessage
                 )
                 return
+            }
+            
+            // 检查截图是否全黑（在模拟器上可能无法正常截图，所以跳过检测）
+            val isEmulator = DeviceUtils.isEmulator()
+            if (BitmapUtils.isBitmapBlack(screenshot)) {
+                if (isEmulator) {
+                    // 在模拟器上，截图可能无法正常工作，但仍然尝试继续
+                    Log.w("ChatViewModel", "检测到模拟器环境，截图是全黑的，但继续执行（模拟器限制）")
+                    // 不返回，继续执行
+                } else {
+                    // 在真机上，如果截图是全黑的，给出错误提示
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = "截图是全黑的，可能是应用设置了 FLAG_SECURE 防止截图，或者是应用正在启动中。请稍后再试。\n\n提示：如果在模拟器上运行，截图功能可能无法正常工作，建议在真机上测试。"
+                    )
+                    return
+                }
             }
             
             // 获取当前应用

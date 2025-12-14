@@ -2,6 +2,7 @@ package com.example.open_autoglm_android.network
 
 import android.graphics.Bitmap
 import android.util.Base64
+import android.util.Log
 import com.example.open_autoglm_android.network.dto.*
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -140,16 +141,75 @@ class ModelClient(
     }
     
     private fun parseResponse(content: String): ModelResponse {
+        Log.d("ModelClient", "解析响应内容: ${content.take(500)}")
+        
         // 解析响应，提取思考过程和动作
-        val thinkingMatch = Regex("<think>(.*?)</think>", RegexOption.DOT_MATCHES_ALL)
+        // 尝试多种标签格式
+        val thinkingMatch = Regex("<(?:think|redacted_reasoning)>(.*?)</(?:think|redacted_reasoning)>", RegexOption.DOT_MATCHES_ALL)
             .find(content)
         val thinking = thinkingMatch?.groupValues?.get(1)?.trim() ?: ""
         
+        // 尝试从 <answer> 标签中提取
         val answerMatch = Regex("<answer>(.*?)</answer>", RegexOption.DOT_MATCHES_ALL)
             .find(content)
-        val action = answerMatch?.groupValues?.get(1)?.trim() ?: content.trim()
+        var action = answerMatch?.groupValues?.get(1)?.trim() ?: ""
+        
+        Log.d("ModelClient", "从 answer 标签提取: $action")
+        
+        // 如果没有 <answer> 标签，尝试从文本中提取 JSON
+        if (action.isEmpty() || !action.trim().startsWith("{")) {
+            val extractedJson = extractJsonFromContent(content)
+            if (extractedJson.isNotEmpty()) {
+                action = extractedJson
+                Log.d("ModelClient", "从内容中提取 JSON: $action")
+            }
+        }
+        
+        // 如果还是找不到，使用整个内容
+        if (action.isEmpty()) {
+            action = content.trim()
+            Log.w("ModelClient", "未找到 JSON，使用整个内容")
+        }
         
         return ModelResponse(thinking = thinking, action = action)
+    }
+    
+    /**
+     * 从内容中提取 JSON 对象
+     */
+    private fun extractJsonFromContent(content: String): String {
+        // 尝试找到 JSON 对象（匹配嵌套的大括号）
+        var startIndex = -1
+        var braceCount = 0
+        val candidates = mutableListOf<String>()
+        
+        for (i in content.indices) {
+            when (content[i]) {
+                '{' -> {
+                    if (startIndex == -1) {
+                        startIndex = i
+                    }
+                    braceCount++
+                }
+                '}' -> {
+                    braceCount--
+                    if (braceCount == 0 && startIndex != -1) {
+                        val candidate = content.substring(startIndex, i + 1)
+                        try {
+                            // 验证是否是有效的 JSON
+                            com.google.gson.JsonParser.parseString(candidate)
+                            candidates.add(candidate)
+                        } catch (e: Exception) {
+                            // 不是有效 JSON，继续查找
+                        }
+                        startIndex = -1
+                    }
+                }
+            }
+        }
+        
+        // 返回第一个有效的 JSON 对象
+        return candidates.firstOrNull() ?: ""
     }
     
     private fun String.ensureTrailingSlash(): String {

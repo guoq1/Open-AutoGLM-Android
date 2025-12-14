@@ -34,9 +34,19 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen() {
     var selectedTab by remember { mutableStateOf(0) }
+    var previousTab by remember { mutableStateOf(0) }
     
     val chatViewModel: ChatViewModel = viewModel()
     val settingsViewModel: SettingsViewModel = viewModel()
+    
+    // 当切换到设置页面时，刷新无障碍服务状态
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == 1 && previousTab != 1) {
+            // 从其他页面切换到设置页面
+            settingsViewModel.checkAccessibilityService()
+        }
+        previousTab = selectedTab
+    }
     
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -57,7 +67,11 @@ fun MainScreen() {
                     icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                     label = { Text("设置") },
                     selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 }
+                    onClick = { 
+                        selectedTab = 1
+                        // 点击设置时立即刷新状态
+                        settingsViewModel.checkAccessibilityService()
+                    }
                 )
             }
         }

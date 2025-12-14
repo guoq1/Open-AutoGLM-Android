@@ -5,11 +5,14 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.os.Build
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 class AutoGLMAccessibilityService : AccessibilityService() {
     
@@ -55,32 +58,64 @@ class AutoGLMAccessibilityService : AccessibilityService() {
     fun takeScreenshot(callback: (Bitmap?) -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
+                Log.d("AutoGLMService", "开始截图...")
                 takeScreenshot(
                     android.view.Display.DEFAULT_DISPLAY,
                     mainExecutor,
                     object : AccessibilityService.TakeScreenshotCallback {
                         override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                val hardwareBuffer = result.hardwareBuffer
-                                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, null)
-                                hardwareBuffer?.close()
-                                _latestScreenshot.value = bitmap
-                                callback(bitmap)
-                            } else {
+                            Log.d("AutoGLMService", "截图成功")
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    val hardwareBuffer = result.hardwareBuffer
+                                    val hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, null)
+                                    hardwareBuffer?.close()
+                                    
+                                    // 将 HARDWARE 格式的 Bitmap 转换为可访问的格式
+                                    val bitmap = if (hardwareBitmap != null && hardwareBitmap.config == Bitmap.Config.HARDWARE) {
+                                        // 转换为 ARGB_8888 格式以便访问像素
+                                        hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                                    } else {
+                                        hardwareBitmap
+                                    }
+                                    
+                                    // 回收硬件 Bitmap（如果已转换）
+                                    if (bitmap != hardwareBitmap) {
+                                        hardwareBitmap?.recycle()
+                                    }
+                                    
+                                    _latestScreenshot.value = bitmap
+                                    Log.d("AutoGLMService", "截图转换成功，尺寸: ${bitmap?.width}x${bitmap?.height}, 格式: ${bitmap?.config}")
+                                    callback(bitmap)
+                                } else {
+                                    Log.w("AutoGLMService", "Android版本不支持")
+                                    callback(null)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("AutoGLMService", "处理截图失败", e)
                                 callback(null)
                             }
                         }
                         
                         override fun onFailure(errorCode: Int) {
+                            Log.e("AutoGLMService", "截图失败，错误码: $errorCode")
                             callback(null)
                         }
                     }
                 )
             } catch (e: Exception) {
+                Log.e("AutoGLMService", "调用截图API失败", e)
                 callback(null)
             }
         } else {
+            Log.w("AutoGLMService", "Android版本低于R (API 30)，不支持截图。当前版本: ${Build.VERSION.SDK_INT}")
             callback(null)
+        }
+    }
+    
+    suspend fun takeScreenshotSuspend(): Bitmap? = suspendCancellableCoroutine { continuation ->
+        takeScreenshot { bitmap ->
+            continuation.resume(bitmap)
         }
     }
     
