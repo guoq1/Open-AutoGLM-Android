@@ -238,7 +238,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val apiKey = preferencesRepository.getApiKeySync() ?: "EMPTY"
                 val modelName = preferencesRepository.getModelNameSync()
                 
-                if (apiKey == null || apiKey.isEmpty() || apiKey == "EMPTY") {
+                if (apiKey == "EMPTY" || apiKey.isEmpty()) {
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         error = "请先在设置页面配置 API Key"
@@ -256,7 +256,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 saveCurrentMessages()
                 
                 // 执行任务循环
-                executeTaskLoop(userInput, modelName, apiKey)
+                executeTaskLoop(userInput, modelName)
                 
             } catch (e: CancellationException) {
                 Log.d("ChatViewModel", "任务已取消")
@@ -296,7 +296,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         FloatingWindowService.getInstance()?.updatePauseStatus(newState)
     }
     
-    private suspend fun executeTaskLoop(userPrompt: String, modelName: String, apiKey: String) {
+    private suspend fun executeTaskLoop(userPrompt: String, modelName: String) {
         val accessibilityService = AutoGLMAccessibilityService.getInstance() ?: return
         val client = modelClient ?: return
         val executor = actionExecutor ?: return
@@ -397,8 +397,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val messagesList: List<NetworkChatMessage> = messageContext.toList()
             val response = client.request(
                 messages = messagesList,
-                modelName = modelName,
-                apiKey = apiKey
+                modelName = modelName
             )
             Log.d("ChatViewModel", "模型响应: thinking=${response.thinking.take(100)}, action=${response.action.take(100)}")
             
