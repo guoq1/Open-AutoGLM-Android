@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.open_autoglm_android"
+    namespace = "com.example.dbgt"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.open_autoglm_android"
+        applicationId = "com.example.dbgt"
         minSdk = 24
         targetSdk = 36
         versionCode = 103

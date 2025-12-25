@@ -1,0 +1,211 @@
+package com.example.dbgt
+
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.os.IBinder
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.example.dbgt.navigation.Screen
+import com.example.dbgt.ui.screen.AdvancedAuthScreen
+import com.example.dbgt.ui.screen.MainScreen
+import com.example.dbgt.ui.screen.SettingsScreen
+import com.example.dbgt.ui.screen.PromptLogScreen
+import com.example.dbgt.ui.theme.OpenAutoGLMAndroidTheme
+import com.example.dbgt.ui.viewmodel.SettingsViewModel
+import com.example.dbgt.util.AccessibilityServiceHelper
+import com.example.dbgt.util.AuthHelper
+import com.example.dbgt.util.AuthHelper.hasWriteSecureSettingsPermission
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import rikka.shizuku.Shizuku
+import rikka.shizuku.shared.BuildConfig
+
+class MainActivity : ComponentActivity(), Shizuku.OnBinderReceivedListener,
+    Shizuku.OnBinderDeadListener, ServiceConnection,
+    Shizuku.OnRequestPermissionResultListener {
+
+    companion object {
+        private const val APPLICATION_ID = "com.example.dbgt"
+        private const val TAG = "MainActivity"
+        private const val PERMISSION_CODE = 10001
+    }
+
+    private val settingsViewModel by viewModels<SettingsViewModel>()
+
+     private var userService: IUserService? = null
+    private val userServiceArgs = Shizuku.UserServiceArgs(ComponentName(APPLICATION_ID, UserService::class.java.name))
+        .daemon(false)
+        .processNameSuffix("adb_shell")
+        .debuggable(false)
+        .version(1)
+
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        initObserver()
+        initShizuku()
+        enableEdgeToEdge()
+        setContent {
+            OpenAutoGLMAndroidTheme {
+                val navController = rememberNavController()
+                NavHost(navController = navController, Screen.Main.name) {
+                    composable(Screen.Main.name) {
+                        MainScreen(
+                            onNavigateToPromptLog = {
+                                navController.navigate(Screen.PromptLog.name)
+                            },
+                            onNavigateToSettings = {
+                                navController.navigate(Screen.Settings.name)
+                            }
+                        )
+                    }
+                    composable(Screen.PromptLog.name) {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
+                        ) {
+                            PromptLogScreen(
+                                onBack = { navController.popBackStack() }
+                            )
+                        }
+                    }
+                    composable(Screen.AdvancedAuth.name) {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
+                        ) {
+                            AdvancedAuthScreen(
+                                onBack = { navController.popBackStack() }
+                            )
+                        }
+                    }
+                    composable(Screen.Settings.name){
+                        SettingsScreen(
+                            viewModel = settingsViewModel,
+                            onNavigateToAdvancedAuth = {
+                                navController.navigate(Screen.AdvancedAuth.name)
+                            },
+                            onBack = {
+                                navController.navigateUp()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun initObserver(){
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED){
+                settingsViewModel.uiState.collect { uiState ->
+                    if (uiState.floatingWindowEnabled){
+                        settingsViewModel.setFloatingWindowEnabled(true)
+                    }
+                    if (!uiState.isAccessibilityEnabled){
+                        if (hasWriteSecureSettingsPermission(this@MainActivity)){
+                            AccessibilityServiceHelper.ensureServiceEnabledViaSecureSettings(this@MainActivity)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun initShizuku() {
+        // 添加权限申请监听
+        Shizuku.addRequestPermissionResultListener(this)
+        // Shizuku服务启动时调用该监听
+        Shizuku.addBinderReceivedListenerSticky(this)
+        // Shizuku服务终止时调用该监听
+        Shizuku.addBinderDeadListener(this)
+    }
+
+    override fun onBinderReceived() {
+        Log.i(TAG,"Shizuku 服务已启动")
+        if ( Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED){
+            connectShizuku()
+        }else{
+            AuthHelper.requestShizukuPermission(this@MainActivity,PERMISSION_CODE)
+        }
+    }
+
+    override fun onBinderDead() {
+        Log.i(TAG,"Shizuku 服务已终止")
+    }
+
+    override fun onServiceConnected(p0: ComponentName?, binder: IBinder?) {
+        Log.i(TAG,"Shizuku 服务服务已连接")
+        if (binder != null && binder.pingBinder()){
+            userService = IUserService.Stub.asInterface(binder)
+            if (hasWriteSecureSettingsPermission(this@MainActivity)) {
+                return
+            }
+
+            val packageName = packageName
+            val permission = "android.permission.WRITE_SECURE_SETTINGS"
+            val command = "pm grant $packageName $permission"
+            val code = userService?.execArr(arrayOf("sh", "-c", command))
+            lifecycleScope.launch {
+                if (code != -1){
+                    delay(500)
+                    if (hasWriteSecureSettingsPermission(this@MainActivity)) {
+                        Toast.makeText(this@MainActivity,"无感保活已开启",Toast.LENGTH_SHORT).show()
+                        AccessibilityServiceHelper.ensureServiceEnabledViaSecureSettings(this@MainActivity)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onServiceDisconnected(p0: ComponentName?) {
+        Log.i(TAG,"Shizuku 服务服务已断开")
+    }
+
+    override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
+        if (grantResult == PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG,"Shizuku 授权成功")
+            connectShizuku()
+
+        } else {
+            Log.i(TAG,"Shizuku 授权失败")
+        }
+    }
+
+    private fun connectShizuku(){
+        if (userService != null) {
+            Log.i(TAG,"已连接Shizuku服务")
+            return
+        }
+
+        Shizuku.bindUserService(userServiceArgs, this)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // 移除权限申请监听
+        Shizuku.removeRequestPermissionResultListener(this)
+        Shizuku.removeBinderReceivedListener(this)
+        Shizuku.removeBinderDeadListener(this)
+        Shizuku.unbindUserService(userServiceArgs, this, true)
+    }
+}

@@ -7,4 +7,11 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Q版鲜艳颜色 -->
+    <color name="q_pink">#FFFF6B8B</color>   <!-- 亮粉色 -->
+    <color name="q_purple">#FF9D6CFF</color> <!-- 浅紫色 -->
+    <color name="q_yellow">#FFFFE066</color> <!-- 鹅黄色 -->
+    <color name="q_blue">#FF66D1FF</color>   <!-- 天蓝色 -->
+    <color name="q_green">#FF91F29B</color>  <!-- 薄荷绿 -->
+    <color name="q_orange">#FFFFA766</color> <!-- 橙色 -->
 </resources>
