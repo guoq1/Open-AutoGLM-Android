@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
@@ -37,12 +38,12 @@ class FloatingWindowService : Service() {
     private var initialTouchY = 0f
     
     // 大小调整
-    private var currentWidth = 280
-    private var currentHeight = 160
-    private val minWidth = 150
-    private val maxWidth = 400
-    private val minHeight = 100
-    private val maxHeight = 300
+    private var currentWidth = 120  // 减小宽度到120dp
+    private var currentHeight = 30  // 减小到只有一行文字的高度
+    private val minWidth = 80
+    private val maxWidth = 200
+    private val minHeight = 30
+    private val maxHeight = 100
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,106 +94,36 @@ class FloatingWindowService : Service() {
         val context = this
         
         return LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xE6303030.toInt())
-            setPadding(dpToPx(12), dpToPx(8), dpToPx(12), dpToPx(8))
+            orientation = LinearLayout.HORIZONTAL  // 水平布局
+            setBackgroundColor(0x80303030.toInt())  // 50% 透明度 (0x80 = 128/255 ≈ 50%)
+            setPadding(dpToPx(6), dpToPx(4), dpToPx(6), dpToPx(4))
             
-            // 标题栏
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                
-                // 标题
-                addView(TextView(context).apply {
-                    text = "任务状态"
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 14f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                })
-                
-                // 暂停/继续按钮 (⏸/▶)
-                addView(TextView(context).apply {
-                    tag = "pause_resume_btn"
-                    text = "⏸"
-                    setTextColor(0xFFFFFF00.toInt()) // 黄色
-                    textSize = 18f
-                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
-                    visibility = View.GONE
-                    setOnClickListener { onPauseResumeClickListener?.invoke() }
-                })
-                
-                // 停止按钮 (⏹)
-                addView(TextView(context).apply {
-                    tag = "stop_btn"
-                    text = "⏹"
-                    setTextColor(0xFFFF4444.toInt())
-                    textSize = 18f
-                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
-                    visibility = View.GONE // 默认隐藏，仅在执行中显示
-                    setOnClickListener { onStopClickListener?.invoke() }
-                })
-                
-                // 缩小按钮
-                addView(TextView(context).apply {
-                    text = "−"
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 18f
-                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
-                    setOnClickListener { adjustSize(-30, -20) }
-                })
-                
-                // 放大按钮
-                addView(TextView(context).apply {
-                    text = "+"
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 18f
-                    setPadding(dpToPx(8), 0, dpToPx(8), 0)
-                    setOnClickListener { adjustSize(30, 20) }
-                })
-                
-                // 折叠/展开按钮
-                addView(TextView(context).apply {
-                    tag = "toggle"
-                    text = "▼"
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 14f
-                    setPadding(dpToPx(8), 0, 0, 0)
-                    setOnClickListener { toggleExpand() }
-                })
+            // 添加黑色边框
+            val strokeDrawable = GradientDrawable().apply {
+                setColor(0x80303030.toInt())  // 背景色
+                setStroke(2, 0xFF000000.toInt())  // 2px黑色边框
+                cornerRadius = dpToPx(4).toFloat()  // 可选的圆角
+            }
+            background = strokeDrawable
+            
+            // 合并的状态和步骤信息
+            addView(TextView(context).apply {
+                tag = "status"
+                text = "$currentStatus ($currentStep)"
+                setTextColor(0xFFCCCCCC.toInt())
+                textSize = 10f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)  // 占据剩余空间
             })
             
-            // 内容区域
-            addView(LinearLayout(context).apply {
-                tag = "content"
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, dpToPx(8), 0, 0)
-                
-                // 状态
-                addView(TextView(context).apply {
-                    tag = "status"
-                    text = "状态: $currentStatus"
-                    setTextColor(0xFFCCCCCC.toInt())
-                    textSize = 12f
-                })
-                
-                // 步骤
-                addView(TextView(context).apply {
-                    tag = "step"
-                    text = "步骤: $currentStep"
-                    setTextColor(0xFFCCCCCC.toInt())
-                    textSize = 12f
-                    setPadding(0, dpToPx(4), 0, 0)
-                })
-                
-                // 详细信息
-                addView(TextView(context).apply {
-                    tag = "detail"
-                    text = ""
-                    setTextColor(0xFF999999.toInt())
-                    textSize = 11f
-                    maxLines = 3
-                    setPadding(0, dpToPx(4), 0, 0)
-                })
+            // 停止按钮 (⏹)
+            addView(TextView(context).apply {
+                tag = "stop_btn"
+                text = "⏹"
+                setTextColor(0xFFFF4444.toInt())
+                textSize = 14f
+                setPadding(dpToPx(4), 0, 0, 0)
+                visibility = View.GONE // 默认隐藏，仅在执行中显示
+                setOnClickListener { onStopClickListener?.invoke() }
             })
         }
     }
@@ -219,35 +150,14 @@ class FloatingWindowService : Service() {
         }
     }
     
-    private fun adjustSize(deltaWidth: Int, deltaHeight: Int) {
-        currentWidth = (currentWidth + deltaWidth).coerceIn(minWidth, maxWidth)
-        currentHeight = (currentHeight + deltaHeight).coerceIn(minHeight, maxHeight)
-        
-        params?.width = dpToPx(currentWidth)
-        params?.height = dpToPx(currentHeight)
-        windowManager?.updateViewLayout(floatingView, params)
-    }
-    
-    private fun toggleExpand() {
-        isExpanded = !isExpanded
-        val content = floatingView?.findViewWithTag<View>("content")
-        val toggle = floatingView?.findViewWithTag<TextView>("toggle")
-        
-        content?.visibility = if (isExpanded) View.VISIBLE else View.GONE
-        toggle?.text = if (isExpanded) "▼" else "▶"
-        
-        params?.height = if (isExpanded) dpToPx(currentHeight) else WindowManager.LayoutParams.WRAP_CONTENT
-        windowManager?.updateViewLayout(floatingView, params)
-    }
+
     
     fun updateStatus(status: String, step: Int = currentStep, detail: String = "") {
         currentStatus = status
         currentStep = step
         
         floatingView?.post {
-            floatingView?.findViewWithTag<TextView>("status")?.text = "状态: $status"
-            floatingView?.findViewWithTag<TextView>("step")?.text = "步骤: $step"
-            floatingView?.findViewWithTag<TextView>("detail")?.text = detail
+            floatingView?.findViewWithTag<TextView>("status")?.text = "$status ($step)"
             
             val isRunningOrPaused = status == "执行中" || status == "已暂停"
             

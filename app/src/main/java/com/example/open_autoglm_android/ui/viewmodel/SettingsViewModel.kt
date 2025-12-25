@@ -1,6 +1,7 @@
 package com.example.open_autoglm_android.ui.viewmodel
 
 import android.app.Application
+import android.content.Intent
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import androidx.lifecycle.AndroidViewModel
@@ -28,7 +29,8 @@ data class SettingsUiState(
     val imageCompressionLevel: Int = 50,
     val isLoading: Boolean = false,
     val saveSuccess: Boolean? = null,
-    val error: String? = null
+    val error: String? = null,
+    val isIgnoringBatteryOptimizations: Boolean = false
 )
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
@@ -43,6 +45,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         checkAccessibilityService()
         checkOverlayPermission()
         checkImeStatus()
+        checkBatteryOptimizationStatus()
     }
     
     private fun loadSettings() {
@@ -110,6 +113,54 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             isImeEnabled = isEnabled,
             isImeSelected = isSelected
         )
+    }
+    
+    fun checkBatteryOptimizationStatus() {
+        val context = getApplication<Application>()
+        val isIgnoring = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val powerManager = context.getSystemService(Application.POWER_SERVICE) as android.os.PowerManager
+            powerManager.isIgnoringBatteryOptimizations(context.packageName)
+        } else {
+            true // 低于 Android M 的版本默认不进行电池优化
+        }
+        _uiState.value = _uiState.value.copy(isIgnoringBatteryOptimizations = isIgnoring)
+    }
+    
+    fun requestIgnoreBatteryOptimization(): Intent? {
+        val context = getApplication<Application>()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val powerManager = context.getSystemService(Application.POWER_SERVICE) as android.os.PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:${context.packageName}")
+                    }
+                    if (intent.resolveActivity(context.packageManager) != null) {
+                        return intent
+                    } else {
+                        // 如果主意图不可用，则使用应用详情页面
+                        return Intent().apply {
+                            action = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                            data = android.net.Uri.parse("package:${context.packageName}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 如果上述方法都失败，返回通用的应用信息页面
+                    return Intent().apply {
+                        action = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                        data = android.net.Uri.parse("package:${context.packageName}")
+                    }
+                }
+            }
+        } else {
+            // Android M 以下版本不需要处理电池优化
+            // 返回应用详情页面作为通用解决方案
+            return Intent().apply {
+                action = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                data = android.net.Uri.parse("package:${context.packageName}")
+            }
+        }
+        return null
     }
     
     fun setFloatingWindowEnabled(enabled: Boolean) {

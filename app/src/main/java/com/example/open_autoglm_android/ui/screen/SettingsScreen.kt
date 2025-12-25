@@ -1,5 +1,6 @@
 package com.example.open_autoglm_android.ui.screen
 
+import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -17,7 +18,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.*
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.text.ClickableText
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -40,6 +44,63 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val hasWriteSecureSettings = remember { mutableStateOf(false) }
+
+/**
+ * 带有超链接的文本组件
+ * @param fullText 完整文本
+ * @param linkText 需要设置为超链接的文本
+ * @param linkUrl 点击链接时打开的URL
+ * @param modifier 修饰符
+ */
+@Composable
+fun HyperlinkText(
+    fullText: String,
+    linkText: String,
+    linkUrl: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    
+    // 创建可变的AnnotatedString
+    val annotatedString = buildAnnotatedString {
+        append(fullText)
+        
+        // 查找链接文本的位置并添加样式
+        val startIndex = fullText.indexOf(linkText)
+        if (startIndex != -1) {
+            addStyle(
+                style = SpanStyle(
+                    color = MaterialTheme.colorScheme.primary,
+                    textDecoration = TextDecoration.Underline
+                ),
+                start = startIndex,
+                end = startIndex + linkText.length
+            )
+            
+            // 添加URL点击处理
+            addStringAnnotation(
+                tag = "URL",
+                annotation = linkUrl,
+                start = startIndex,
+                end = startIndex + linkText.length
+            )
+        }
+    }
+    
+    ClickableText(
+        text = annotatedString,
+        style = MaterialTheme.typography.bodySmall.copy(
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        ),
+        modifier = modifier
+    ) { offset ->
+        // 检查点击位置是否在链接上
+        annotatedString.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()?.let { span ->
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(span.item))
+            context.startActivity(intent)
+        }
+    }
+}
     val lifecycleOwner = LocalLifecycleOwner.current
 
     DisposableEffect(Unit) {
@@ -49,6 +110,7 @@ fun SettingsScreen(
                 viewModel.checkAccessibilityService()
                 viewModel.checkOverlayPermission()
                 viewModel.checkImeStatus()
+                viewModel.checkBatteryOptimizationStatus()
             }
         }
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
@@ -114,69 +176,6 @@ fun SettingsScreen(
                 }
             }
 
-            // 输入模式设置
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "输入方式 (Type Action)",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    InputMode.values().forEach { mode ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = uiState.inputMode == mode,
-                                onClick = { viewModel.setInputMode(mode) }
-                            )
-                            Text(
-                                text = when (mode) {
-                                    InputMode.SET_TEXT -> "直接设置文本 (标准)"
-                                    InputMode.PASTE -> "复制粘贴 (兼容性好)"
-                                    InputMode.IME -> "输入法模拟 (最强悍)"
-                                },
-                                modifier = Modifier.padding(start = 8.dp)
-                            )
-                        }
-                    }
-
-                    if (uiState.inputMode == InputMode.IME) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        if (!uiState.isImeEnabled) {
-                            Button(
-                                onClick = { context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("1. 启用 AutoGLM 输入法") }
-                        } else if (!uiState.isImeSelected) {
-                            Button(
-                                onClick = {
-                                    val imm =
-                                        context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                                    imm.showInputMethodPicker()
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("2. 切换为 AutoGLM 输入法") }
-                        } else {
-                            Text(
-                                text = "✓ 输入法已就绪",
-                                color = MaterialTheme.colorScheme.primary,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                }
-            }
-
             // 悬浮窗设置
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -224,12 +223,18 @@ fun SettingsScreen(
                 }
             }
 
-            Divider()
 
-            // 实验型功能
+
+            // 电池优化设置
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                colors = CardDefaults.cardColors(
+                    containerColor = if (uiState.isIgnoringBatteryOptimizations) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer
+                    }
+                )
             ) {
                 Column(
                     modifier = Modifier
@@ -238,86 +243,53 @@ fun SettingsScreen(
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.Science,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(text = "实验型功能", style = MaterialTheme.typography.titleMedium)
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = "图片压缩", style = MaterialTheme.typography.bodyLarge)
+                        Column {
+                            Text(text = "电池优化", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                text = "发送给模型前压缩图片，减少流量消耗和延迟",
+                                text = if (uiState.isIgnoringBatteryOptimizations) "已忽略电池优化" else "电池优化生效中 - 点击前往设置",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
-                        Switch(
-                            checked = uiState.imageCompressionEnabled,
-                            onCheckedChange = { viewModel.setImageCompressionEnabled(it) }
-                        )
-                    }
-
-                    if (uiState.imageCompressionEnabled) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "压缩级别: ${uiState.imageCompressionLevel}%",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Slider(
-                            value = uiState.imageCompressionLevel.toFloat(),
-                            onValueChange = { viewModel.setImageCompressionLevel(it.roundToInt()) },
-                            valueRange = 10f..100f,
-                            steps = 8
-                        )
-                    }
-                }
-            }
-
-            Divider()
-
-            // 高级授权
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = if (hasWriteSecureSettings.value) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "高级授权与无感保活",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = if (hasWriteSecureSettings.value) "✓ 已授权" else "✗ 未授权",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        IconButton(onClick = onNavigateToAdvancedAuth) {
-                            Icon(
-                                Icons.Filled.ArrowForward,
-                                contentDescription = null
-                            )
+                        if (!uiState.isIgnoringBatteryOptimizations) {
+                            Button(onClick = {
+                                try {
+                                    // 尝试直接使用 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 弹出系统对话框
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                            data = android.net.Uri.parse("package:${context.packageName}")
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        if (intent.resolveActivity(context.packageManager) != null) {
+                                            context.startActivity(intent)
+                                        } else {
+                                            // 如果系统意图不可用，使用应用详情页面
+                                            val fallbackIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                data = android.net.Uri.parse("package:${context.packageName}")
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            context.startActivity(fallbackIntent)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    // 如果出现异常，使用应用详情页面作为最后的备选方案
+                                    try {
+                                        val fallbackIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                            data = android.net.Uri.parse("package:${context.packageName}")
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(fallbackIntent)
+                                    } catch (ex: Exception) {
+                                        // 如果所有方法都失败，尝试使用通用设置页面
+                                        val genericIntent = Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS)
+                                        context.startActivity(genericIntent)
+                                    }
+                                }
+                            }) { Text("前往设置") }
+                        } else {
+                            Text("已忽略")
                         }
                     }
                 }
@@ -333,21 +305,7 @@ fun SettingsScreen(
                 singleLine = true
             )
 
-            OutlinedTextField(
-                value = uiState.baseUrl,
-                onValueChange = { viewModel.updateBaseUrl(it) },
-                label = { Text("Base URL") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
 
-            OutlinedTextField(
-                value = uiState.modelName,
-                onValueChange = { viewModel.updateModelName(it) },
-                label = { Text("Model Name") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
 
             Button(
                 onClick = { viewModel.saveSettings() },
@@ -391,10 +349,12 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = "说明：\n1. 开启无障碍服务\n2. 若遇到输入框无法输入，请尝试切换输入方式为“复制粘贴”或“输入法模拟”\n3. 使用“输入法模拟”时需要先在系统设置中启用并切换到 AutoGLM 输入法",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            // 使用可组合函数创建带有超链接的文本
+            HyperlinkText(
+                fullText = "说明：\n1. 开启无障碍服务\n2. 开启忽略电池优化\n3. 输入智普平台的API Key并保存",
+                linkText = "智普平台API Key",
+                linkUrl = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+                modifier = Modifier
             )
         }
     }
